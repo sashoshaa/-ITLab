@@ -1,13 +1,67 @@
 from PyQt6 import QtWidgets, QtGui, QtCore
 import pymysql
 import os
+import sys
+
+class MLApp(QtWidgets.QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("ML Model Interface")
+        self.setGeometry(100, 100, 1200, 700)
+        
+        self.initUI()
+    
+    def initUI(self):
+        self.central_widget = QtWidgets.QWidget()
+        self.setCentralWidget(self.central_widget)
+        
+        layout = QtWidgets.QVBoxLayout()
+        
+        self.tabs = QtWidgets.QTabWidget()
+        self.tabs.setStyleSheet("""
+            QTabWidget::pane { border: none; }
+            QTabBar::tab {
+                background: white; padding: 10px; font-size: 16px;
+                border: 1px solid #007ACC; border-radius: 5px;
+            }
+            QTabBar::tab:selected {
+                background: #007ACC; color: white;
+            }
+        """)
+        
+        self.data_tab = DatabaseViewer()
+        self.model_tab = QtWidgets.QWidget()
+        self.execution_tab = QtWidgets.QWidget()
+        
+        self.tabs.addTab(self.data_tab, "Данные")
+        self.tabs.addTab(self.model_tab, "Модель")
+        self.tabs.addTab(self.execution_tab, "Исполнение")
+        
+        layout.addWidget(self.tabs)
+        self.central_widget.setLayout(layout)
+        
+        self.setupModelTab()
+        self.setupExecutionTab()
+    
+    def setupModelTab(self):
+        layout = QtWidgets.QVBoxLayout()
+        label = QtWidgets.QLabel("Выбор модели и запуск тренировки")
+        label.setFont(QtGui.QFont("Segoe UI", 18))
+        layout.addWidget(label)
+        self.model_tab.setLayout(layout)
+    
+    def setupExecutionTab(self):
+        layout = QtWidgets.QVBoxLayout()
+        label = QtWidgets.QLabel("Исполнение модели и сохранение результатов")
+        label.setFont(QtGui.QFont("Segoe UI", 18))
+        layout.addWidget(label)
+        self.execution_tab.setLayout(layout)
 
 class DatabaseViewer(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("База данных Фото")
         self.setGeometry(100, 100, 1200, 700)  
-        
         
         self.setStyleSheet("""
             QWidget {
@@ -17,7 +71,7 @@ class DatabaseViewer(QtWidgets.QWidget):
             }
             QTableWidget {
                 font-size: 16px;
-                background-color: rgba(0, 0, 0, 0.85);  # Сделали фон таблицы темным (почти черным)
+                background-color: rgba(0, 0, 0, 0.85);
                 border: 1px solid #00b5e2;
                 border-radius: 10px;
             }
@@ -55,7 +109,6 @@ class DatabaseViewer(QtWidgets.QWidget):
     
     def load_data(self):
         try:
-            # Используем pymysql для подключения к базе данных
             conn = pymysql.connect(
                 host="localhost",
                 user="root",
@@ -71,7 +124,6 @@ class DatabaseViewer(QtWidgets.QWidget):
             self.table.setRowCount(len(rows))
             self.table.setColumnCount(5)
             self.table.setHorizontalHeaderLabels(["ID", "Фото", "Сжатое Фото", "Размер", "Сжатый размер", "Разрешение"])
-
             
             self.table.setColumnWidth(0, 180)
             self.table.setColumnWidth(1, 250)
@@ -89,7 +141,7 @@ class DatabaseViewer(QtWidgets.QWidget):
                     self.table.setItem(row_idx, col_idx, item)
                     
                 self.table.item(row_idx, 0).setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
-                self.table.item(row_idx, 0).setForeground(QtGui.QBrush(QtGui.QColor("#ffffff")))  # ID - белый
+                self.table.item(row_idx, 0).setForeground(QtGui.QBrush(QtGui.QColor("#ffffff")))
                 self.table.item(row_idx, 0).setFont(QtGui.QFont("Segoe UI", 14, QtGui.QFont.Weight.Bold))
             
             self.table.cellClicked.connect(self.show_image)
@@ -114,8 +166,7 @@ class DatabaseViewer(QtWidgets.QWidget):
         self.image_viewer = image_viewer
 
 if __name__ == "__main__":
-    import sys
     app = QtWidgets.QApplication(sys.argv)
-    viewer = DatabaseViewer()
-    viewer.show()
+    window = MLApp()
+    window.show()
     sys.exit(app.exec())
