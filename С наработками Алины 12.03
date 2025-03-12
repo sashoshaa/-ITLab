@@ -1,0 +1,226 @@
+from PyQt6 import QtWidgets, QtGui, QtCore
+import pymysql
+import os
+import sys
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+import skimage.feature as skf
+from PyQt6.QtGui import QPixmap
+from skimage.feature import graycomatrix, graycoprops
+from PyQt6.QtWidgets import QLabel
+
+class Texture:
+    def __init__(self, image_path):
+        self.image_path = image_path
+        self.image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+        if self.image is None:
+            raise ValueError(f"Ошибка: Не удалось загрузить изображение {image_path}")
+
+    def textural(self):
+        mean = np.mean(self.image)
+        variance = np.var(self.image)
+        std_dev = np.std(self.image)
+        return mean, variance, std_dev
+
+    def lavs_characteristics(self):
+        laplacian = cv2.Laplacian(self.image, cv2.CV_64F)
+        mean = np.mean(laplacian)
+        variance = np.var(laplacian)
+        std_dev = np.std(laplacian)
+        return mean, variance, std_dev
+
+    def histogramming(self):
+        plt.figure(figsize=(10, 6))
+        # Нормализация изображения для корректного построения гистограммы
+        norm_image = cv2.normalize(self.image, None, 0, 255, cv2.NORM_MINMAX)
+        plt.hist(norm_image.ravel(), bins=256, range=[0, 256], color='blue', alpha=0.7)
+        plt.xlabel("Интенсивность пикселя")
+        plt.ylabel("Количество пикселей")
+        plt.title("Гистограмма изображения")
+        plt.savefig("histogram.png")
+        plt.close()
+        return "histogram.png"
+
+    def glcm_analysis(self):
+        # Используем правильное имя функции
+        glcm = graycomatrix(self.image, distances=[1], angles=[0], levels=256, symmetric=True, normed=True)
+    
+        # Теперь используем правильное имя функции для получения характеристик
+        contrast = graycoprops(glcm, 'contrast')[0, 0]
+        dissimilarity = graycoprops(glcm, 'dissimilarity')[0, 0]
+        homogeneity = graycoprops(glcm, 'homogeneity')[0, 0]
+        energy = graycoprops(glcm, 'energy')[0, 0]
+        correlation = graycoprops(glcm, 'correlation')[0, 0]
+        asm = graycoprops(glcm, 'ASM')[0, 0]
+
+        features = {            
+            "Контраст": contrast,
+            "Несходство": dissimilarity,
+            "Однородность": homogeneity,
+            "Энергия": energy,
+            "Корреляция": correlation,
+            "ASM": asm
+        }
+        return glcm, features
+
+    def visualize_glcm(self, glcm):
+        plt.figure(figsize=(5, 5))
+        plt.imshow(glcm[:, :, 0, 0], cmap='gray')
+        plt.title("Матрица GLCM")
+        plt.colorbar()
+        plt.savefig("glcm_matrix.png")
+        plt.close()
+        return "glcm_matrix.png"
+
+class MLApp(QtWidgets.QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("ML Model Interface")
+        self.setGeometry(100, 100, 1200, 700)
+        
+        self.initUI()
+    
+    def initUI(self):
+        self.central_widget = QtWidgets.QWidget()
+        self.setCentralWidget(self.central_widget)
+        
+        layout = QtWidgets.QVBoxLayout()
+        
+        self.tabs = QtWidgets.QTabWidget()
+        self.tabs.setStyleSheet("""
+            QTabWidget::pane { border: none; }
+            QTabBar::tab {
+                background: white; padding: 10px; font-size: 16px;
+                border: 1px solid #007ACC; border-radius: 5px;
+            }
+            QTabBar::tab:selected {
+                background: #007ACC; color: white;
+            }
+        """)
+        
+        self.data_tab = DatabaseViewer()
+        self.model_tab = QtWidgets.QWidget()
+        self.execution_tab = QtWidgets.QWidget()
+        
+        self.tabs.addTab(self.data_tab, "Данные")
+        self.tabs.addTab(self.model_tab, "Модель")
+        self.tabs.addTab(self.execution_tab, "Исполнение")
+        
+        layout.addWidget(self.tabs)
+        self.central_widget.setLayout(layout)
+        
+        self.setupModelTab()
+        self.setupExecutionTab()
+    
+    def setupModelTab(self):
+        layout = QtWidgets.QVBoxLayout()
+        label = QtWidgets.QLabel("Выбор модели и запуск тренировки")
+        label.setFont(QtGui.QFont("Segoe UI", 18))
+        layout.addWidget(label)
+        self.model_tab.setLayout(layout)
+    
+    def setupExecutionTab(self):
+        layout = QtWidgets.QVBoxLayout()
+        label = QtWidgets.QLabel("Исполнение модели и сохранение результатов")
+        label.setFont(QtGui.QFont("Segoe UI", 18))
+        layout.addWidget(label)
+        self.execution_tab.setLayout(layout)
+
+class DatabaseViewer(QtWidgets.QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("База данных Фото")
+        self.setGeometry(100, 100, 1200, 700)  
+
+        self.layout = QtWidgets.QVBoxLayout()
+        self.table = QtWidgets.QTableWidget()
+        self.layout.addWidget(self.table)
+        self.setLayout(self.layout)
+        
+        self.load_data()
+    
+    def load_data(self):
+        try:
+            conn = pymysql.connect(
+                host="localhost",
+                user="root",
+                password="Dorogusha1",
+                database="JupiterDB"
+            )
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, original_path, compressed_path, original_size, compressed_size FROM Photos")
+            
+            rows = cursor.fetchall()
+            conn.close()
+            
+            self.table.setRowCount(len(rows))
+            self.table.setColumnCount(7)  # Добавляем столбцы для анализа
+            self.table.setHorizontalHeaderLabels([
+                "ID", "Фото", "Сжатое Фото", "Размер", "Сжатый размер",
+                "Гистограмма", "GLCM"
+            ])
+            
+            for row_idx, row_data in enumerate(rows):
+                for col_idx, col_data in enumerate(row_data):
+                    item = QtWidgets.QTableWidgetItem(str(col_data))
+                    item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                    self.table.setItem(row_idx, col_idx, item)
+                    
+                self.analyze_image(row_idx, row_data[1])  # Анализ изображения
+                
+            self.table.cellClicked.connect(self.show_image)
+        except pymysql.MySQLError as err:
+            print(f"Ошибка подключения к БД: {err}")
+
+    def analyze_image(self, row_idx, image_path):
+        try:
+            texture = Texture(image_path)
+
+            # Гистограмма
+            hist_path = texture.histogramming()
+            hist_label = QLabel()
+            hist_pixmap = QPixmap(hist_path).scaled(100, 100)
+            hist_label.setPixmap(hist_pixmap)
+            self.table.setCellWidget(row_idx, 5, hist_label)
+
+            # GLCM Анализ
+            glcm, features = texture.glcm_analysis()
+            glcm_path = texture.visualize_glcm(glcm)
+            glcm_label = QLabel()
+            glcm_pixmap = QPixmap(glcm_path).scaled(100, 100)
+            glcm_label.setPixmap(glcm_pixmap)
+            self.table.setCellWidget(row_idx, 6, glcm_label)
+
+        except Exception as e:
+            print(f"Ошибка анализа изображения {image_path}: {e}")
+
+    def show_image(self, row, col):
+        if col == 1 or col == 5 or col == 6:
+            # путь к изображению в зависимости от ячейки
+            if col == 1:
+                image_path = self.table.item(row, 1).text()
+            elif col == 5:
+                image_path = "histogram.png"  # Здесь будет путь к гистограмме
+            elif col == 6:
+                image_path = "glcm_matrix.png"  # Здесь будет путь к GLCM
+
+            if os.path.exists(image_path):
+                self.display_image(image_path)
+
+    def display_image(self, path):
+        image_viewer = QtWidgets.QLabel()
+        pixmap = QtGui.QPixmap(path)
+        image_viewer.setPixmap(pixmap)
+        image_viewer.setScaledContents(True)
+        image_viewer.setWindowTitle("Просмотр изображения")
+        image_viewer.resize(600, 400)
+        image_viewer.show()
+        self.image_viewer = image_viewer
+
+
+if __name__ == "__main__":
+    app = QtWidgets.QApplication(sys.argv)
+    window = MLApp()
+    window.show()
+    sys.exit(app.exec())
