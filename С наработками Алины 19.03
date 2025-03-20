@@ -1,0 +1,487 @@
+from PyQt6 import QtWidgets, QtGui, QtCore
+import pymysql
+import os
+import sys
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+import skimage.feature as skf
+from PyQt6.QtGui import QPixmap
+from skimage.feature import graycomatrix, graycoprops
+from PyQt6.QtWidgets import QLabel
+import uuid  # Для генерации уникального имени
+from sklearn.cluster import KMeans  # Добавляем K-means
+
+# Путь к папке для сегментированных изображений
+segmented_folder = os.path.join("C:\\Users\\alexa\\Videos\\ITLab", "SegmentedImages")
+
+# Создаем папку, если она не существует
+if not os.path.exists(segmented_folder):
+    os.makedirs(segmented_folder)
+
+class Texture:
+    def __init__(self, image_path):
+        self.image_path = image_path
+        self.image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+        if self.image is None:
+            raise ValueError(f"Ошибка: Не удалось загрузить изображение {image_path}")
+
+    def textural(self):
+        mean = np.mean(self.image)
+        variance = np.var(self.image)
+        std_dev = np.std(self.image)
+        return mean, variance, std_dev
+
+    def lavs_characteristics(self):
+        laplacian = cv2.Laplacian(self.image, cv2.CV_64F)
+        mean = np.mean(laplacian)
+        variance = np.var(laplacian)
+        std_dev = np.std(laplacian)
+        return mean, variance, std_dev
+
+    def histogramming(self):
+        plt.figure(figsize=(10, 6))
+
+        # Вычисление гистограммы яркости
+        hist = cv2.calcHist([self.image], [0], None, [256], [0, 256])
+    
+        # Кумулятивная гистограмма
+        cumulative_hist = np.cumsum(hist)
+
+        # Нормализация для корректного отображения
+        hist /= hist.max()
+        cumulative_hist /= cumulative_hist.max()
+
+        # Построение графиков
+        plt.plot(hist, color='blue', label="Гистограмма яркости")
+        plt.plot(cumulative_hist, color='red', linestyle='--', label="Кумулятивная гистограмма")
+    
+        plt.xlabel("Яркость пикселя")
+        plt.ylabel("Нормализованное количество пикселей")
+        plt.title("Гистограмма и кумулятивная гистограмма яркости")
+        plt.legend()
+
+        # Генерация уникального имени файла
+        hist_filename = f"histogram_{uuid.uuid4().hex[:8]}.png"
+        hist_path = os.path.join(segmented_folder, hist_filename)
+        plt.savefig(hist_path)
+        plt.close()
+    
+        return hist_path
+
+    def glcm_analysis(self):
+        # Вычисляем GLCM
+        glcm = graycomatrix(
+            self.image, 
+            distances=[1], 
+            angles=[0], 
+            levels=256, 
+            symmetric=True, 
+            normed=True
+        )
+
+        # Проверяем, что GLCM не нулевая
+        if np.max(glcm) == 0:
+            print("Предупреждение: GLCM содержит только нули. Возможно, изображение не содержит текстуры.")
+
+        # Вычисляем характеристики
+        contrast = graycoprops(glcm, 'contrast')[0, 0]
+        dissimilarity = graycoprops(glcm, 'dissimilarity')[0, 0]
+        homogeneity = graycoprops(glcm, 'homogeneity')[0, 0]
+        energy = graycoprops(glcm, 'energy')[0, 0]
+        correlation = graycoprops(glcm, 'correlation')[0, 0]
+        asm = graycoprops(glcm, 'ASM')[0, 0]
+
+        features = {            
+            "Контраст": contrast,
+            "Несходство": dissimilarity,
+            "Однородность": homogeneity,
+            "Энергия": energy,
+            "Корреляция": correlation,
+            "ASM": asm
+        }
+        return glcm, features
+
+    def visualize_glcm(self, glcm):
+        plt.figure(figsize=(5, 5))
+
+        # Нормализуем GLCM для визуализации
+        glcm_normalized = glcm[:, :, 0, 0] / np.max(glcm[:, :, 0, 0])  # Нормализация
+
+        # Визуализация GLCM
+        plt.imshow(glcm_normalized, cmap='gray', vmin=0, vmax=1)  # Используем диапазон [0, 1]
+        plt.title("Матрица GLCM (нормализованная)")
+        plt.colorbar()
+
+        # Генерация уникального имени файла
+        glcm_filename = f"glcm_{uuid.uuid4().hex[:8]}.png"
+        glcm_path = os.path.join(segmented_folder, glcm_filename)
+        plt.savefig(glcm_path)
+        plt.close()
+
+        return glcm_path
+    
+    def watershed_segmentation(self):
+        print(f"Обрабатывается изображение: {self.image_path}")
+
+        # Загружаем цветное изображение
+        image_color = cv2.imread(self.image_path)
+        if image_color is None:
+            raise ValueError(f"Ошибка: не удалось загрузить изображение {self.image_path}")
+
+        # Преобразуем в градации серого
+        image_gray = cv2.cvtColor(image_color, cv2.COLOR_BGR2GRAY)
+
+        # Бинаризация изображения
+        _, thresh = cv2.threshold(image_gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+        # Убираем шумы с помощью морфологических операций
+        kernel = np.ones((3, 3), np.uint8)
+        opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=2)
+
+        # Определяем область фона
+        sure_bg = cv2.dilate(opening, kernel, iterations=3)
+
+        # Дистанционное преобразование
+        dist_transform = cv2.distanceTransform(opening, cv2.DIST_L2, 5)
+        _, sure_fg = cv2.threshold(dist_transform, 0.7 * dist_transform.max(), 255, cv2.THRESH_BINARY)
+
+        # Находим неизвестную область
+        sure_fg = np.uint8(sure_fg)
+        unknown = cv2.subtract(sure_bg, sure_fg)
+
+        # Маркируем метки
+        _, markers = cv2.connectedComponents(sure_fg)
+        markers = markers + 1  # Делаем метки от 1, а фон — 0
+        markers[unknown == 255] = 0  # Обозначаем неизвестную область как 0
+
+        # Применяем watershed
+        markers = cv2.watershed(image_color, markers)
+
+        # Окрашиваем границы объектов в красный цвет
+        image_color[markers == -1] = [255, 0, 0]  # Красный цвет для границ
+
+        # Создаем маску для сегментированных объектов
+        mask = np.zeros_like(image_gray, dtype=np.uint8)
+        mask[markers > 1] = 255  # Все, что не фон и не границы, становится белым
+
+        # Применяем маску к исходному изображению
+        segmented_image = cv2.bitwise_and(image_color, image_color, mask=mask)
+
+        # Сохраняем результат в папку SegmentedImages
+        segmented_filename = f"segmented_{uuid.uuid4().hex[:8]}.png"
+        segmented_path = os.path.join(segmented_folder, segmented_filename)
+        cv2.imwrite(segmented_path, segmented_image)
+
+        print(f"Сегментированное изображение сохранено: {segmented_path}")
+        return segmented_path
+    
+    def kmeans_segmentation(self, k=3):
+        """
+        Сегментация изображения с использованием K-means.
+        :param k: Количество кластеров.
+        :return: Путь к сохраненному изображению.
+        """
+        # Загружаем цветное изображение
+        image = cv2.imread(self.image_path)
+        if image is None:
+            raise ValueError(f"Ошибка: не удалось загрузить изображение {self.image_path}")
+
+        # Преобразуем изображение в массив пикселей
+        pixel_values = image.reshape((-1, 3))
+        pixel_values = np.float32(pixel_values)
+
+        # Применяем K-means
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.2)
+        _, labels, centers = cv2.kmeans(pixel_values, k, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
+
+        # Преобразуем центры кластеров в 8-битные значения
+        centers = np.uint8(centers)
+
+        # Создаем сегментированное изображение
+        segmented_image = centers[labels.flatten()]
+        segmented_image = segmented_image.reshape(image.shape)
+
+        # Сохраняем результат в папку SegmentedImages
+        kmeans_filename = f"kmeans_{uuid.uuid4().hex[:8]}.png"
+        kmeans_path = os.path.join(segmented_folder, kmeans_filename)
+        cv2.imwrite(kmeans_path, segmented_image)
+
+        print(f"K-means сегментация сохранена: {kmeans_path}")
+        return kmeans_path
+    
+    
+    def region_growing(self, seed_points, threshold=10):
+        """
+        Реализация алгоритма разрастания регионов.
+        :param seed_points: Список начальных точек (затравок) в формате [(x1, y1), (x2, y2), ...].
+        :param threshold: Порог схожести пикселей.
+        :return: Путь к сохраненному изображению.
+        """
+        # Загружаем изображение
+        image = cv2.imread(self.image_path, cv2.IMREAD_GRAYSCALE)
+        if image is None:
+            raise ValueError(f"Ошибка: не удалось загрузить изображение {self.image_path}")
+
+        # Создаем маску для регионов
+        mask = np.zeros_like(image, dtype=np.uint8)
+
+        # Переменная для хранения регионов
+        regions = []
+
+        # Для каждой затравки выполняем разрастание
+        for seed in seed_points:
+            x, y = seed
+            if mask[y, x] != 0:  # Если пиксель уже принадлежит региону, пропускаем
+                continue
+
+            # Создаем новый регион
+            region = np.zeros_like(image, dtype=np.uint8)
+            region[y, x] = 255  # Начальная точка
+            mask[y, x] = 255
+
+            # Очередь для обработки пикселей
+            queue = []
+            queue.append((x, y))
+
+            while len(queue) > 0:
+                current_x, current_y = queue.pop(0)
+
+                # Проверяем соседние пиксели
+                for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    nx, ny = current_x + dx, current_y + dy
+
+                    # Проверяем, что пиксель внутри изображения
+                    if nx < 0 or ny < 0 or nx >= image.shape[1] or ny >= image.shape[0]:
+                        continue
+
+                    # Проверяем, что пиксель еще не обработан
+                    if mask[ny, nx] != 0:
+                        continue
+
+                    # Проверяем схожесть пикселей
+                    if abs(int(image[ny, nx]) - int(image[current_y, current_x])) <= threshold:
+                        mask[ny, nx] = 255
+                        region[ny, nx] = 255
+                        queue.append((nx, ny))
+
+            regions.append(region)
+
+        # Объединяем все регионы в одну маску
+        final_mask = np.zeros_like(image, dtype=np.uint8)
+        for region in regions:
+            final_mask = cv2.bitwise_or(final_mask, region)
+
+        # Применяем маску к исходному изображению
+        segmented_image = cv2.bitwise_and(image, image, mask=final_mask)
+
+        # Сохраняем результат в папку SegmentedImages
+        region_growing_filename = f"region_growing_{uuid.uuid4().hex[:8]}.png"
+        region_growing_path = os.path.join(segmented_folder, region_growing_filename)
+        cv2.imwrite(region_growing_path, segmented_image)
+
+        print(f"Результат разрастания регионов сохранен: {region_growing_path}")
+        return region_growing_path
+
+
+class MLApp(QtWidgets.QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("ML Model Interface")
+        self.setGeometry(100, 100, 1200, 700)
+        
+        self.initUI()
+    
+    def initUI(self):
+        self.central_widget = QtWidgets.QWidget()
+        self.setCentralWidget(self.central_widget)
+        
+        layout = QtWidgets.QVBoxLayout()
+        
+        self.tabs = QtWidgets.QTabWidget()
+        self.tabs.setStyleSheet("""
+            QTabWidget::pane { border: none; }
+            QTabBar::tab {
+                background: white; padding: 10px; font-size: 16px;
+                border: 1px solid #007ACC; border-radius: 5px;
+            }
+            QTabBar::tab:selected {
+                background: #007ACC; color: white;
+            }
+        """)
+        
+        self.data_tab = DatabaseViewer()
+        self.model_tab = QtWidgets.QWidget()
+        self.execution_tab = QtWidgets.QWidget()
+        
+        self.tabs.addTab(self.data_tab, "Данные")
+        self.tabs.addTab(self.model_tab, "Модель")
+        self.tabs.addTab(self.execution_tab, "Исполнение")
+        
+        layout.addWidget(self.tabs)
+        self.central_widget.setLayout(layout)
+        
+        self.setupModelTab()
+        self.setupExecutionTab()
+    
+    def setupModelTab(self):
+        layout = QtWidgets.QVBoxLayout()
+        label = QtWidgets.QLabel("Выбор модели и запуск тренировки")
+        label.setFont(QtGui.QFont("Segoe UI", 18))
+        layout.addWidget(label)
+        self.model_tab.setLayout(layout)
+    
+    def setupExecutionTab(self):
+        layout = QtWidgets.QVBoxLayout()
+        label = QtWidgets.QLabel("Исполнение модели и сохранение результатов")
+        label.setFont(QtGui.QFont("Segoe UI", 18))
+        layout.addWidget(label)
+        self.execution_tab.setLayout(layout)
+
+class DatabaseViewer(QtWidgets.QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("База данных Фото")
+        self.setGeometry(100, 100, 1200, 700)  
+
+        self.layout = QtWidgets.QVBoxLayout()
+        self.table = QtWidgets.QTableWidget()
+        self.layout.addWidget(self.table)
+        self.setLayout(self.layout)
+        
+        self.load_data()
+    
+    def load_data(self):
+        try:
+            conn = pymysql.connect(
+                host="localhost",
+                user="root",
+                password="Dorogusha1",
+                database="JupiterDB"
+            )
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, original_path, compressed_path, original_size, compressed_size, segmented_path FROM Photos")
+            
+            rows = cursor.fetchall()
+            conn.close()
+            
+            self.table.setRowCount(len(rows))
+            self.table.setColumnCount(16)  
+            self.table.setHorizontalHeaderLabels([
+            "ID", "Фото", "Сжатое Фото", "Размер", "Сжатый размер",
+            "Гистограмма", "GLCM", "Сегментация", "Kmeans", "Разрастание регионов",
+            "Mean", "Variance", "Std Dev",  # Текстурный анализ
+            "Laplacian Mean", "Laplacian Variance", "Laplacian Std Dev"  # Лапласиан
+            ])
+
+            for row_idx, row_data in enumerate(rows):
+                for col_idx, col_data in enumerate(row_data):
+                    item = QtWidgets.QTableWidgetItem(str(col_data))
+                    item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                    self.table.setItem(row_idx, col_idx, item)
+                    
+                self.analyze_image(row_idx, row_data[1])  # Анализ изображения
+                    
+            self.table.cellClicked.connect(self.show_image)
+        except pymysql.MySQLError as err:
+            print(f"Ошибка подключения к БД: {err}")
+
+    def analyze_image(self, row_idx, image_path):
+        try:
+            texture = Texture(image_path)
+
+            # Текстурный анализ
+            mean, variance, std_dev = texture.textural()
+            self.table.setItem(row_idx, 10, QtWidgets.QTableWidgetItem(f"{mean:.2f}"))  # Mean
+            self.table.setItem(row_idx, 11, QtWidgets.QTableWidgetItem(f"{variance:.2f}"))  # Variance
+            self.table.setItem(row_idx, 12, QtWidgets.QTableWidgetItem(f"{std_dev:.2f}"))  # Std Dev
+
+            # Характеристики лапласиана
+            lap_mean, lap_variance, lap_std_dev = texture.lavs_characteristics()
+            self.table.setItem(row_idx, 13, QtWidgets.QTableWidgetItem(f"{lap_mean:.2f}"))  # Laplacian Mean
+            self.table.setItem(row_idx, 14, QtWidgets.QTableWidgetItem(f"{lap_variance:.2f}"))  # Laplacian Variance
+            self.table.setItem(row_idx, 15, QtWidgets.QTableWidgetItem(f"{lap_std_dev:.2f}"))  # Laplacian Std Dev
+
+            # Гистограмма
+            hist_path = texture.histogramming()
+            hist_label = QLabel()
+            hist_pixmap = QPixmap(hist_path).scaled(100, 100)
+            hist_label.setPixmap(hist_pixmap)
+            self.table.setCellWidget(row_idx, 5, hist_label)
+            self.table.setItem(row_idx, 5, QtWidgets.QTableWidgetItem(hist_path))  # Сохраняем путь
+
+            # GLCM Анализ
+            glcm, features = texture.glcm_analysis()
+            glcm_path = texture.visualize_glcm(glcm)
+            glcm_label = QLabel()
+            glcm_pixmap = QPixmap(glcm_path).scaled(100, 100)
+            glcm_label.setPixmap(glcm_pixmap)
+            self.table.setCellWidget(row_idx, 6, glcm_label)
+            self.table.setItem(row_idx, 6, QtWidgets.QTableWidgetItem(glcm_path))  # Сохраняем путь
+
+            # Сегментация изображения
+            segmentation_path = texture.watershed_segmentation()
+            segmentation_label = QLabel()
+            segmentation_pixmap = QPixmap(segmentation_path).scaled(100, 100)
+            segmentation_label.setPixmap(segmentation_pixmap)
+            self.table.setCellWidget(row_idx, 7, segmentation_label)
+            self.table.setItem(row_idx, 7, QtWidgets.QTableWidgetItem(segmentation_path))  # Сохраняем путь
+
+            # K-means сегментация
+            kmeans_path = texture.kmeans_segmentation(k=3)
+            kmeans_label = QLabel()
+            kmeans_pixmap = QPixmap(kmeans_path).scaled(100, 100)
+            kmeans_label.setPixmap(kmeans_pixmap)
+            self.table.setCellWidget(row_idx, 8, kmeans_label)
+            self.table.setItem(row_idx, 8, QtWidgets.QTableWidgetItem(kmeans_path))  # Сохраняем путь
+
+            # Разрастание регионов
+            seed_points = [(100, 100), (200, 200)]  # Пример начальных точек
+            region_growing_path = texture.region_growing(seed_points, threshold=10)
+            region_growing_label = QLabel()
+            region_growing_pixmap = QPixmap(region_growing_path).scaled(100, 100)
+            region_growing_label.setPixmap(region_growing_pixmap)
+            self.table.setCellWidget(row_idx, 9, region_growing_label)
+            self.table.setItem(row_idx, 9, QtWidgets.QTableWidgetItem(region_growing_path))  # Сохраняем путь
+
+        except Exception as e:
+            print(f"Ошибка анализа изображения {image_path}: {e}")
+
+
+    def show_image(self, row, col):
+        if col in [1, 5, 6, 7, 8, 9]:  # Добавляем столбец 9
+            if col == 1:
+                image_path = self.table.item(row, 1).text()  # Исходное изображение
+            elif col == 5:
+                image_path = self.table.item(row, 5).text()  # Гистограмма
+            elif col == 6:
+                image_path = self.table.item(row, 6).text()  # GLCM
+            elif col == 7:
+                image_path = self.table.item(row, 7).text()  # Сегментированное изображение
+            elif col == 8:
+                image_path = self.table.item(row, 8).text()  # K-means сегментация
+            elif col == 9:
+                image_path = self.table.item(row, 9).text()  # Разрастание регионов
+
+            print(f"Открываем изображение: {image_path}")  # Отладочная информация
+            if os.path.exists(image_path):
+                self.display_image(image_path)
+            else:
+                print(f"Ошибка: файл {image_path} не существует")
+
+    def display_image(self, path):
+        image_viewer = QtWidgets.QLabel()
+        pixmap = QtGui.QPixmap(path)
+        image_viewer.setPixmap(pixmap)
+        image_viewer.setScaledContents(True)
+        image_viewer.setWindowTitle("Просмотр изображения")
+        image_viewer.resize(600, 400)
+        image_viewer.show()
+        self.image_viewer = image_viewer
+
+
+if __name__ == "__main__":
+    app = QtWidgets.QApplication(sys.argv)
+    window = MLApp()
+    window.show()
+    sys.exit(app.exec())
