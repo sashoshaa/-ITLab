@@ -1,0 +1,475 @@
+#Шаблон 27.03
+from PyQt6 import QtWidgets, QtGui, QtCore
+import pymysql
+import os
+import sys
+import nbformat
+import html
+import base64
+from markdown import markdown
+from PyQt6.QtGui import QPixmap
+from PyQt6.QtCore import Qt, QByteArray
+
+
+class MLApp(QtWidgets.QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("ML Model Interface")
+        self.setGeometry(100, 100, 1200, 700)
+        self.initUI()
+
+    def initUI(self):
+        self.central_widget = QtWidgets.QWidget()
+        self.setCentralWidget(self.central_widget)
+        layout = QtWidgets.QVBoxLayout()
+        self.tabs = QtWidgets.QTabWidget()
+        self.tabs.setStyleSheet("""
+            QTabWidget::pane { border: none; }
+            QTabBar::tab {
+                background: white; padding: 10px; font-size: 16px;
+                border: 1px solid #007ACC; border-radius: 5px;
+            }
+            QTabBar::tab:selected {
+                background: #007ACC; color: white;
+            }
+        """)
+        self.data_tab = DatabaseViewer()
+        self.description_tab = DescriptionTab()
+        self.model_tab = QtWidgets.QWidget()
+        self.results_tab = QtWidgets.QWidget()
+        self.notebook_tab = NotebookTab()
+        
+        self.tabs.addTab(self.data_tab, "Данные")
+        self.tabs.addTab(self.description_tab, "Описание")
+        self.tabs.addTab(self.model_tab, "Модель")
+        self.tabs.addTab(self.results_tab, "Результаты")
+        self.tabs.addTab(self.notebook_tab, "Файлы .ipynb")
+        
+        layout.addWidget(self.tabs)
+        self.central_widget.setLayout(layout)
+        self.setupModelTab()
+        self.setupResultsTab()
+
+    def setupModelTab(self):
+        layout = QtWidgets.QVBoxLayout()
+        label = QtWidgets.QLabel("Выбор модели и запуск тренировки")
+        label.setFont(QtGui.QFont("Segoe UI", 18))
+        layout.addWidget(label)
+        self.model_tab.setLayout(layout)
+
+    def setupResultsTab(self):
+        layout = QtWidgets.QVBoxLayout()
+        label = QtWidgets.QLabel("Результаты работы моделей")
+        label.setFont(QtGui.QFont("Segoe UI", 18))
+        layout.addWidget(label)
+        self.results_tab.setLayout(layout)
+
+
+class DescriptionTab(QtWidgets.QWidget):
+    def __init__(self):
+        super().__init__()
+        self.initUI()
+        
+    def initUI(self):
+        layout = QtWidgets.QVBoxLayout()
+        
+        # Создаем область прокрутки
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        
+        # Основной виджет для контента
+        content_widget = QtWidgets.QWidget()
+        content_layout = QtWidgets.QVBoxLayout()
+    
+        
+        
+        
+        
+        layout.addWidget(scroll)
+        self.setLayout(layout)
+
+
+class NotebookTab(QtWidgets.QWidget):
+    def __init__(self):
+        super().__init__()
+        self.notebooks_folder = r"C:\Users\alexa\Videos\.ipynb"  # Замените на ваш путь
+        self.initUI()
+        self.load_notebooks_list()
+        
+    def initUI(self):
+        self.layout = QtWidgets.QVBoxLayout()
+        
+        # Control layout
+        control_layout = QtWidgets.QHBoxLayout()
+        
+        # Notebooks combo box
+        self.notebooks_combo = QtWidgets.QComboBox()
+        self.notebooks_combo.currentIndexChanged.connect(self.load_selected_notebook)
+        control_layout.addWidget(self.notebooks_combo)
+        
+        self.layout.addLayout(control_layout)
+        
+        # Scroll area for content
+        self.scroll = QtWidgets.QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        
+        self.content_widget = QtWidgets.QWidget()
+        self.content_layout = QtWidgets.QVBoxLayout()
+        self.content_widget.setLayout(self.content_layout)
+        
+        self.scroll.setWidget(self.content_widget)
+        self.layout.addWidget(self.scroll)
+        
+        self.setLayout(self.layout)
+    
+    def load_notebooks_list(self):
+        self.notebooks_combo.clear()
+        
+        if not os.path.exists(self.notebooks_folder):
+            self.notebooks_combo.addItem("Папка не найдена!")
+            return
+            
+        notebook_files = [f for f in os.listdir(self.notebooks_folder) 
+                         if f.endswith('.ipynb')]
+        
+        if not notebook_files:
+            self.notebooks_combo.addItem("Нет .ipynb файлов в папке")
+            return
+            
+        self.notebooks_combo.addItem("-- Выберите ноутбук --")
+        
+        for file in sorted(notebook_files):
+            self.notebooks_combo.addItem(file)
+    
+    def load_selected_notebook(self, index):
+        if index <= 0:
+            return
+            
+        filename = self.notebooks_combo.itemText(index)
+        filepath = os.path.join(self.notebooks_folder, filename)
+        self.display_notebook(filepath)
+    
+    def clear_content(self):
+        while self.content_layout.count():
+            child = self.content_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+    
+    def display_notebook(self, file_path):
+        self.clear_content()
+        
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                notebook = nbformat.read(f, as_version=4)
+                
+            for cell in notebook.cells:
+                if cell.cell_type == 'markdown':
+                    self.display_markdown(cell)
+                elif cell.cell_type == 'code':
+                    self.display_code_cell(cell)
+                
+        except Exception as e:
+            error_label = QtWidgets.QLabel(f"Ошибка загрузки ноутбука: {str(e)}")
+            self.content_layout.addWidget(error_label)
+    
+    def display_markdown(self, cell):
+        html_content = markdown(cell.source)
+        label = QtWidgets.QLabel()
+        label.setTextFormat(Qt.TextFormat.RichText)
+        label.setText(html_content)
+        label.setWordWrap(True)
+        label.setMargin(10)
+        self.content_layout.addWidget(label)
+    
+    def display_code_cell(self, cell):
+        # Display code
+        code_label = QtWidgets.QLabel(f"<pre><code>{html.escape(cell.source)}</code></pre>")
+        code_label.setTextFormat(Qt.TextFormat.RichText)
+        code_label.setStyleSheet("""
+            background-color: #f5f5f5; 
+            padding: 10px;
+            font-family: monospace;
+            border-radius: 4px;
+            margin: 5px 0;
+        """)
+        self.content_layout.addWidget(code_label)
+        
+        # Display outputs
+        if cell.outputs:
+            for output in cell.outputs:
+                if output.output_type == 'stream':
+                    self.display_stream_output(output)
+                elif output.output_type in ['display_data', 'execute_result']:
+                    self.display_data_output(output)
+                elif output.output_type == 'error':
+                    self.display_error_output(output)
+    
+    def display_stream_output(self, output):
+        text = ''.join(output.text)
+        output_label = QtWidgets.QLabel(f"<pre>{html.escape(text)}</pre>")
+        output_label.setTextFormat(Qt.TextFormat.RichText)
+        output_label.setStyleSheet("""
+            color: #333; 
+            padding: 5px;
+            font-family: monospace;
+            background-color: #f8f8f8;
+            border-radius: 4px;
+            margin: 5px 0;
+        """)
+        self.content_layout.addWidget(output_label)
+    
+    def display_data_output(self, output):
+        if 'text/plain' in output.data:
+            text = output.data['text/plain']
+            if isinstance(text, list):
+                text = ''.join(text)
+            output_label = QtWidgets.QLabel(f"<pre>{html.escape(str(text))}</pre>")
+            output_label.setTextFormat(Qt.TextFormat.RichText)
+            output_label.setStyleSheet("font-family: monospace;")
+            self.content_layout.addWidget(output_label)
+        
+        if 'text/html' in output.data:
+            html_content = output.data['text/html']
+            if isinstance(html_content, list):
+                html_content = ''.join(html_content)
+            output_label = QtWidgets.QLabel()
+            output_label.setTextFormat(Qt.TextFormat.RichText)
+            output_label.setText(html_content)
+            self.content_layout.addWidget(output_label)
+        
+        if 'image/png' in output.data:
+            self.display_image(output.data['image/png'])
+    
+    def display_image(self, image_data):
+        try:
+            if isinstance(image_data, list):
+                image_data = ''.join(image_data)
+            
+            image_bytes = base64.b64decode(image_data)
+            
+            pixmap = QPixmap()
+            pixmap.loadFromData(QByteArray(image_bytes), 'PNG')
+            
+            if pixmap.isNull():
+                raise ValueError("Не удалось загрузить изображение")
+            
+            image_label = QtWidgets.QLabel()
+            image_label.setPixmap(pixmap)
+            image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            image_label.setStyleSheet("""
+                margin: 10px 0;
+                padding: 5px;
+                background-color: white;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+            """)
+            self.content_layout.addWidget(image_label)
+            
+        except Exception as e:
+            error_label = QtWidgets.QLabel(f"Ошибка загрузки изображения: {str(e)}")
+            error_label.setStyleSheet("color: red;")
+            self.content_layout.addWidget(error_label)
+    
+    def display_error_output(self, output):
+        error_text = '\n'.join(output.traceback)
+        error_label = QtWidgets.QLabel(f"<pre style='color: red;'>{html.escape(error_text)}</pre>")
+        error_label.setTextFormat(Qt.TextFormat.RichText)
+        error_label.setStyleSheet("""
+            background-color: #ffeeee;
+            padding: 10px;
+            border-radius: 4px;
+            margin: 5px 0;
+        """)
+        self.content_layout.addWidget(error_label)
+
+
+class DatabaseViewer(QtWidgets.QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("База данных Фото")
+        self.setGeometry(100, 100, 1200, 700)
+        self.layout = QtWidgets.QVBoxLayout()
+        self.table = QtWidgets.QTableWidget()
+        self.layout.addWidget(self.table)
+        self.refresh_button = QtWidgets.QPushButton("Обновить")
+        self.refresh_button.clicked.connect(self.load_data)
+        self.layout.addWidget(self.refresh_button)
+        self.setLayout(self.layout)
+        self.load_data()
+        self.scan_and_update_db()  # Сканируем папки и обновляем БД при запуске
+
+    def load_data(self):
+        try:
+            conn = pymysql.connect(
+                host="localhost",
+                user="root",
+                password="Dorogusha1",
+                database="JupiterDB"
+            )
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM ImageData")
+            rows = cursor.fetchall()
+            conn.close()
+            self.table.setRowCount(len(rows))
+            self.table.setColumnCount(29)
+            self.table.setHorizontalHeaderLabels([
+                "ID", "Имя изображения", "Имя маски", "Среднее значение изображения", "Среднее значение маски",
+                "Дисперсия изображения", "Дисперсия маски", "Стандартное отклонение изображения", "Стандартное отклонение маски",
+                "Текстурные характеристики Laws изображения", "Текстурные характеристики Laws маски", "Признаки изображения",
+                "Признаки маски", "Матрица взаимной встречаемости пикселей изображения", "Матрица взаимной встречаемости пикселей маски",
+                "intersection изображения и маски", "over изображения и маски", "precision изображения и маски", "recall изображения и маски",
+                "l1_metric изображения и маски", "intersection watershed_segmentation и маски", "over watershed_segmentation и маски",
+                "precision watershed_segmentation и маски", "recall watershed_segmentation и маски", "l1_metric watershed_segmentation и маски",
+                "intersection kmeans и маски", "over kmeans и маски", "precision kmeans и маски", "recall kmeans и маски", "l1_metric kmeans и маски"
+            ])
+            for row_idx, row_data in enumerate(rows):
+                for col_idx, col_data in enumerate(row_data):
+                    item = QtWidgets.QTableWidgetItem(str(col_data))
+                    item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                    self.table.setItem(row_idx, col_idx, item)
+            self.table.cellClicked.connect(self.show_image)
+        except pymysql.MySQLError as err:
+            print(f"Ошибка подключения к БД: {err}")
+
+    def scan_and_update_db(self):
+        images_folder = "D:/dataset_egor_003_19/test/img"
+        masks_folder = "D:/dataset_egor_003_19/test/mask"
+
+        progress = QtWidgets.QProgressDialog("Обновление базы данных...", "Отмена", 0, 100, self)
+        progress.setWindowTitle("Ход выполнения")
+        progress.show()
+
+        try:
+            conn = pymysql.connect(
+                host="localhost",
+                user="root",
+                password="Dorogusha1",
+                database="JupiterDB"
+            )
+            cursor = conn.cursor()
+            progress.setValue(10)
+
+            # Получаем существующие ID из БД
+            cursor.execute("SELECT id FROM ImageData")
+            existing_ids = {row[0] for row in cursor.fetchall()}
+            progress.setValue(20)
+
+            # Сканируем файлы
+            img_files = {}
+            for f in os.listdir(images_folder):
+                if f.startswith('img_') and f.lower().endswith(('.jpg', '.png')):
+                    try:
+                        num = int(f.split('_')[1].split('.')[0])  # Преобразуем номер в int
+                        img_files[num] = f
+                    except (IndexError, ValueError):
+                        continue
+
+            mask_files = {}
+            for f in os.listdir(masks_folder):
+                if f.startswith('mask_') and f.lower().endswith(('.jpg', '.png')):
+                    try:
+                        num = int(f.split('_')[1].split('.')[0])
+                        mask_files[num] = f
+                    except (IndexError, ValueError):
+                        continue
+
+            progress.setValue(50)
+
+            # Находим новые записи для добавления
+            new_entries = []
+            for num in img_files:
+                if num not in existing_ids and num in mask_files:
+                    new_entries.append((num, img_files[num], mask_files[num]))
+
+            progress.setValue(70)
+
+            # Добавляем с указанием ID
+            added_count = 0
+            for num, img_name, mask_name in new_entries:
+                try:
+                    cursor.execute(
+                        "INSERT INTO ImageData (id, image_name, mask_name) VALUES (%s, %s, %s)",
+                        (num, img_name, mask_name)
+                    )
+                    added_count += 1
+                except Exception as e:
+                    print(f"Ошибка при добавлении ID {num}: {e}")
+
+            conn.commit()
+            progress.setValue(90)
+
+            # Формируем отчет
+            result_msg = f"""
+            Результаты обновления:
+            
+            Всего изображений: {len(img_files)}
+            Всего масок: {len(mask_files)}
+            Новых записей найдено: {len(new_entries)}
+            Успешно добавлено: {added_count}
+            
+            Проблемы:
+            - Изображений без масок: {len(img_files) - len(mask_files)}
+            - Ошибок при добавлении: {len(new_entries) - added_count}
+            """
+
+            QtWidgets.QMessageBox.information(
+                self, 
+                "Обновление завершено", 
+                result_msg
+            )
+
+            progress.setValue(100)
+
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Ошибка",
+                f"Произошла ошибка: {str(e)}"
+            )
+            if 'conn' in locals():
+                conn.rollback()
+        finally:
+            if 'conn' in locals():
+                conn.close()
+            progress.close()
+            self.load_data()  # Обновляем отображение таблицы
+
+    def show_image(self, row, col):
+        images_folder = "D:/dataset_egor_003_19/test/img"
+        masks_folder = "D:/dataset_egor_003_19/test/mask"
+
+        # Определяем, какой столбец был выбран
+        if col == 1:  # Столбец "Имя изображения"
+            image_name = self.table.item(row, col).text()
+            image_name = image_name.replace("img/", "")
+            image_path = os.path.join(images_folder, image_name)
+        elif col == 2:  # Столбец "Имя маски"
+            mask_name = self.table.item(row, col).text()
+            mask_name = mask_name.replace("mask/", "")
+            image_path = os.path.join(masks_folder, mask_name)
+        else:
+            return  # Если это не столбец с изображением, ничего не делаем
+
+        # Проверяем, существует ли файл
+        if os.path.exists(image_path):
+            self.display_image(image_path)
+        else:
+            print(f"Ошибка: файл {image_path} не найден")
+
+    def display_image(self, path):
+        # Создаем окно для отображения изображения
+        image_viewer = QtWidgets.QLabel()
+        pixmap = QtGui.QPixmap(path)
+        image_viewer.setPixmap(pixmap)
+        image_viewer.setScaledContents(True)
+        image_viewer.setWindowTitle("Просмотр изображения")
+        image_viewer.resize(600, 400)
+        image_viewer.show()
+        self.image_viewer = image_viewer
+
+
+if __name__ == "__main__":
+    app = QtWidgets.QApplication(sys.argv)
+    window = MLApp()
+    window.show()
+    sys.exit(app.exec())
