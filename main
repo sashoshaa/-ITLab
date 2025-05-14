@@ -1,0 +1,1364 @@
+from PyQt6 import QtWidgets, QtGui, QtCore
+import pymysql
+import os
+import sys
+import nbformat
+import io
+import hashlib
+import html
+import time
+import shutil
+import torch
+import torchvision.transforms.v2 as tfs_v2
+import random
+import base64
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.serialization import load
+import cv2
+import numpy as np
+from markdown import markdown
+from PyQt6.QtGui import QPixmap
+from PyQt6.QtCore import Qt, QByteArray
+from image_processor import ImageProcessor
+from texture_lab import Texture, Laws, GLCMAnalysis, Watershed_segmentation, Kmeans
+from PyQt6.QtGui import QImage
+
+
+class MLApp(QtWidgets.QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("ML Model Interface")
+        self.setGeometry(100, 100, 1200, 700)
+        self.initUI()
+
+    def initUI(self):
+        self.central_widget = QtWidgets.QWidget()
+        self.setCentralWidget(self.central_widget)
+        layout = QtWidgets.QVBoxLayout()
+        self.tabs = QtWidgets.QTabWidget()
+        self.tabs.setStyleSheet("""
+            QTabWidget::pane { border: none; }
+            QTabBar::tab {
+                background: white; padding: 10px; font-size: 16px;
+                border: 1px solid #007ACC; border-radius: 5px;
+            }
+            QTabBar::tab:selected {
+                background: #007ACC; color: white;
+            }
+        """)
+        self.data_tab = DatabaseViewer()
+        self.description_tab = DescriptionTab()
+        self.model_tab = QtWidgets.QWidget()  # Это временный заглушка, будет заменено
+        self.results_tab = QtWidgets.QWidget()
+        self.notebook_tab = NotebookTab()
+        
+        self.tabs.addTab(self.data_tab, "Данные")
+        self.tabs.addTab(self.description_tab, "Анализатор")
+        self.tabs.addTab(self.model_tab, "Модель")
+        self.tabs.addTab(self.results_tab, "Результаты")
+        self.tabs.addTab(self.notebook_tab, "Файлы .ipynb")
+        
+        layout.addWidget(self.tabs)
+        self.central_widget.setLayout(layout)
+        
+        # Заменяем временную заглушку на реальную вкладку модели
+        self.setupModelTab()
+        self.setupResultsTab()
+
+    def setupModelTab(self):
+        """Инициализация вкладки модели (заменяет временную заглушку)"""
+        self.model_tab = ModelTab()  # Создаем нашу новую вкладку модели
+        self.tabs.removeTab(2)  # Удаляем временную заглушку (индекс 2 - это вкладка "Модель")
+        self.tabs.insertTab(2, self.model_tab, "Модель")  # Вставляем новую вкладку на то же место
+
+    def setupResultsTab(self):
+        layout = QtWidgets.QVBoxLayout()
+        label = QtWidgets.QLabel("Результаты работы моделей")
+        label.setFont(QtGui.QFont("Segoe UI", 18))
+        layout.addWidget(label)
+        self.results_tab.setLayout(layout)
+
+class DescriptionTab(QtWidgets.QWidget):
+    def __init__(self):
+        super().__init__()
+        self.initUI()
+        
+    def initUI(self):
+        # Главный layout
+        main_layout = QtWidgets.QHBoxLayout()
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(15)
+        
+        # Левая часть (описание + статистика)
+        left_layout = QtWidgets.QVBoxLayout()
+        
+        # Создаем группу для выбора датасета
+        group_box = QtWidgets.QGroupBox("Выбор датасета")
+        group_box.setStyleSheet("""
+            QGroupBox {
+                font-size: 14px;
+                font-weight: bold;
+                padding-top: 15px;
+            }
+        """)
+        
+        # Layout для группы
+        group_layout = QtWidgets.QHBoxLayout()
+        group_layout.setContentsMargins(15, 20, 15, 15)
+        
+        # Выпадающий список
+        self.dataset_combo = QtWidgets.QComboBox()
+        self.dataset_combo.setFont(QtGui.QFont("Segoe UI", 12))
+        self.dataset_combo.setMinimumWidth(250)
+        
+        # Описания датасетов
+        self.datasets = {
+            "Основной датасет (Egor)": {
+                "description": "Это основной датасет, содержащий 1418 изображений и соответствующих масок.\n\n"
+                              "Характеристики:\n"
+                              "- Разрешение: 256x256 пикселей\n"
+                              "- Формат: JPG\n"
+                              "- Сбалансированное распределение объектов\n"
+                              "- Аннотации в виде бинарных масок",
+                "path": "D:/dataset_egor_003_19",
+                "img_folder": "test/img",
+                "mask_folder": "test/mask"
+            }
+        }
+        
+        self.dataset_combo.addItems(self.datasets.keys())
+        self.dataset_combo.currentIndexChanged.connect(self.update_content)
+        
+        # Кнопка обновления статистики
+        self.refresh_stats_btn = QtWidgets.QPushButton("Рассчет статистики")
+        self.refresh_stats_btn.setFixedWidth(150)
+        self.refresh_stats_btn.clicked.connect(self.calculate_and_update_stats)
+        
+        # Кнопка открытия папки
+        self.open_btn = QtWidgets.QPushButton("Открыть папку")
+        self.open_btn.setFixedWidth(120)
+        self.open_btn.clicked.connect(self.open_dataset_folder)
+        
+        # Добавляем элементы в группу
+        group_layout.addWidget(QtWidgets.QLabel("Доступные датасеты:"), stretch=1)
+        group_layout.addWidget(self.dataset_combo, stretch=3)
+        group_layout.addWidget(self.refresh_stats_btn)
+        group_layout.addWidget(self.open_btn)
+        group_box.setLayout(group_layout)
+        
+        # Splitter для разделения описания и статистики
+        self.splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        
+        # Область описания
+        desc_group = QtWidgets.QGroupBox("Описание датасета")
+        desc_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 14px;
+                font-weight: bold;
+                padding-top: 15px;
+            }
+        """)
+        
+        desc_layout = QtWidgets.QVBoxLayout()
+        desc_layout.setContentsMargins(15, 20, 15, 15)
+        
+        self.description_label = QtWidgets.QLabel()
+        self.description_label.setFont(QtGui.QFont("Segoe UI", 11))
+        self.description_label.setWordWrap(True)
+        self.description_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
+        
+        # Добавляем прокрутку
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self.description_label)
+        desc_layout.addWidget(scroll)
+        desc_group.setLayout(desc_layout)
+        
+        # Область статистики
+        stats_group = QtWidgets.QGroupBox("Статистика датасета")
+        stats_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 14px;
+                font-weight: bold;
+                padding-top: 15px;
+            }
+        """)
+        
+        stats_layout = QtWidgets.QVBoxLayout()
+        stats_layout.setContentsMargins(15, 20, 15, 15)
+        
+        # Таблица статистики
+        self.stats_table = QtWidgets.QTableWidget()
+        self.stats_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.stats_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.stats_table.setStyleSheet("""
+            QTableWidget {
+                font-size: 11px;
+                gridline-color: #e0e0e0;
+            }
+            QHeaderView::section {
+                background-color: #f0f0f0;
+                padding: 5px;
+                border: 1px solid #d0d0d0;
+            }
+        """)
+        
+        stats_layout.addWidget(self.stats_table)
+        stats_group.setLayout(stats_layout)
+        
+        # Добавляем группы в splitter
+        self.splitter.addWidget(desc_group)
+        self.splitter.addWidget(stats_group)
+        self.splitter.setSizes([200, 300])
+        
+        # Добавляем группы в левый layout
+        left_layout.addWidget(group_box)
+        left_layout.addWidget(self.splitter, stretch=1)
+        
+        # Правая часть (визуализация)
+        right_layout = QtWidgets.QVBoxLayout()
+        
+        # Группа для визуализации
+        vis_group = QtWidgets.QGroupBox("Визуализация образца")
+        vis_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 14px;
+                font-weight: bold;
+                padding-top: 15px;
+            }
+        """)
+        
+        vis_layout = QtWidgets.QVBoxLayout()
+        vis_layout.setContentsMargins(15, 20, 15, 15)
+        
+        # Виджет для отображения изображения
+        self.image_label = QtWidgets.QLabel()
+        self.image_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.image_label.setStyleSheet("border: 1px solid #d0d0d0;")
+        
+        # Кнопка для обновления визуализации
+        self.refresh_vis_btn = QtWidgets.QPushButton("Обновить визуализацию")
+        self.refresh_vis_btn.clicked.connect(self.update_visualization)
+        
+        vis_layout.addWidget(self.image_label)
+        vis_layout.addWidget(self.refresh_vis_btn)
+        vis_group.setLayout(vis_layout)
+        
+        right_layout.addWidget(vis_group)
+        
+        # Добавляем левую и правую части в главный layout
+        main_layout.addLayout(left_layout, stretch=2)
+        main_layout.addLayout(right_layout, stretch=1)
+        
+        self.setLayout(main_layout)
+        self.update_content()
+        self.update_visualization()
+
+    def update_visualization(self):
+        """Обновляет визуализацию случайного образца"""
+        current_dataset = self.dataset_combo.currentText()
+        dataset_info = self.datasets.get(current_dataset, {})
+        
+        if not dataset_info:
+            return
+            
+        img_dir = os.path.join(dataset_info["path"], dataset_info["img_folder"])
+        mask_dir = os.path.join(dataset_info["path"], dataset_info["mask_folder"])
+        
+        if not os.path.exists(img_dir) or not os.path.exists(mask_dir):
+            return
+            
+        img_files = [f for f in os.listdir(img_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+        mask_files = [f for f in os.listdir(mask_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+        
+        if not img_files or not mask_files:
+            return
+            
+        # Выбираем случайный файл
+        idx = random.randint(0, min(len(img_files), len(mask_files)) - 1)
+        img_path = os.path.join(img_dir, img_files[idx])
+        mask_path = os.path.join(mask_dir, mask_files[idx])
+        
+        try:
+            # Загружаем изображение и маску
+            img = cv2.imread(img_path)
+            mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+            
+            if img is None or mask is None:
+                return
+                
+            # Создаем наложение маски
+            _, binary = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
+            overlay = img.copy()
+            overlay[binary == 255] = (0, 255, 0)  # Зеленый цвет для маски
+            
+            # Смешиваем изображение и наложение
+            alpha = 0.5
+            blended = cv2.addWeighted(img, 1 - alpha, overlay, alpha, 0)
+            
+            # Конвертируем в QImage
+            height, width, channel = blended.shape
+            bytes_per_line = 3 * width
+            q_img = QImage(blended.data, width, height, bytes_per_line, QImage.Format.Format_BGR888)
+            
+            # Масштабируем и отображаем
+            pixmap = QPixmap.fromImage(q_img)
+            scaled_pixmap = pixmap.scaled(400, 400, QtCore.Qt.AspectRatioMode.KeepAspectRatio)
+            self.image_label.setPixmap(scaled_pixmap)
+            
+        except Exception as e:
+            print(f"Ошибка при визуализации: {e}")
+
+    def calculate_dataset_stats(self, dataset_info):
+        """Рассчитывает статистику для выбранного датасета"""
+        try:
+            stats = {}
+            dataset_path = dataset_info.get("path")
+            img_folder = dataset_info.get("img_folder")
+            mask_folder = dataset_info.get("mask_folder")
+            
+            if not all([dataset_path, img_folder, mask_folder]):
+                return None
+                
+            img_dir = os.path.join(dataset_path, img_folder)
+            mask_dir = os.path.join(dataset_path, mask_folder)
+            
+            if not os.path.exists(img_dir):
+                QtWidgets.QMessageBox.warning(self, "Ошибка", f"Папка с изображениями не найдена: {img_dir}")
+                return None
+                
+            if not os.path.exists(mask_dir):
+                QtWidgets.QMessageBox.warning(self, "Ошибка", f"Папка с масками не найдена: {mask_dir}")
+                return None
+                
+            # Получаем список файлов
+            img_files = [f for f in os.listdir(img_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+            mask_files = [f for f in os.listdir(mask_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+            
+            # Базовые статистики
+            stats["1. Общее количество изображений"] = len(img_files)
+            stats["2. Общее количество масок"] = len(mask_files)
+            
+            if not img_files:
+                QtWidgets.QMessageBox.warning(self, "Ошибка", "В папке с изображениями нет подходящих файлов")
+                return stats
+                
+            # Анализируем первое изображение для получения размера
+            try:
+                sample_img_path = os.path.join(img_dir, img_files[0])
+                sample_img = cv2.imread(sample_img_path)
+                if sample_img is None:
+                    QtWidgets.QMessageBox.warning(self, "Ошибка", f"Не удалось прочитать изображение: {sample_img_path}")
+                    return stats
+                    
+                stats["3. Размер изображений"] = f"{sample_img.shape[1]}x{sample_img.shape[0]}"
+                total_pixels = sample_img.shape[0] * sample_img.shape[1]
+            except Exception as e:
+                QtWidgets.QMessageBox.warning(self, "Ошибка", f"Ошибка при анализе изображения: {str(e)}")
+                return stats
+            
+            # Инициализация списков для статистик
+            tumor_areas = []
+            num_regions = []
+            mask_pixels = []
+            mean_r = []
+            mean_g = []
+            mean_b = []
+            
+            # Анализ выборки изображений и масок
+            sample_size = min(1413, len(img_files), len(mask_files))
+            sample_indices = random.sample(range(len(img_files)), sample_size)
+            
+            for idx in sample_indices:
+                try:
+                    # Обработка изображения (цвет)
+                    img_path = os.path.join(img_dir, img_files[idx])
+                    img = cv2.imread(img_path)
+                    if img is not None:
+                        mean_bgr = np.mean(img, axis=(0, 1))  # BGR порядок
+                        mean_b.append(mean_bgr[0])
+                        mean_g.append(mean_bgr[1])
+                        mean_r.append(mean_bgr[2])
+                    
+                    # Обработка маски
+                    mask_path = os.path.join(mask_dir, mask_files[idx])
+                    mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+                    if mask is not None:
+                        _, binary = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
+                        object_pixels = np.sum(binary > 0)
+                        mask_pixels.append(object_pixels)
+                        
+                        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                        num_regions.append(len(contours))
+                        tumor_area = np.sum(binary == 255)
+                        tumor_areas.append(tumor_area)
+                        
+                except Exception as e:
+                    print(f"Ошибка обработки {img_files[idx]}/{mask_files[idx]}: {e}")
+                    continue
+            
+            # Добавление всех статистик в таблицу
+            if mean_r and mean_g and mean_b:
+                stats["4. Средняя интенсивность R"] = f"{np.mean(mean_r):.1f}"
+                stats["5. Средняя интенсивность G"] = f"{np.mean(mean_g):.1f}"
+                stats["6. Средняя интенсивность B"] = f"{np.mean(mean_b):.1f}"
+            
+            if mask_pixels:
+                stats["7. Среднее пикселей объектов"] = f"{np.mean(mask_pixels):.1f}"
+                stats["8. Макс пикселей объектов"] = f"{np.max(mask_pixels)}"
+                stats["9. Мин пикселей объектов"] = f"{np.min(mask_pixels)}"
+            
+            if tumor_areas:
+                stats["10. Средний размер опухоли (px²)"] = f"{np.mean(tumor_areas):.1f}"
+                stats["11. Макс размер опухоли"] = f"{np.max(tumor_areas)}"
+                stats["12. Мин размер опухоли"] = f"{np.min(tumor_areas)}"
+                
+                tumor_percent = (np.mean(tumor_areas) / total_pixels) * 100
+                stats["13. Процент патологии"] = f"{tumor_percent:.1f}%"
+                stats["14. Процент здоровой ткани"] = f"{100 - tumor_percent:.1f}%"
+            
+            if num_regions:
+                stats["15. Среднее число регионов"] = f"{np.mean(num_regions):.1f}"
+            
+            return stats
+            
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Ошибка", f"Неожиданная ошибка: {str(e)}")
+            return None
+
+    def update_stats_table(self, stats_data):
+        """Обновляет таблицу статистики"""
+        self.stats_table.clear()
+        
+        if not stats_data:
+            self.stats_table.setRowCount(1)
+            self.stats_table.setColumnCount(1)
+            self.stats_table.setItem(0, 0, QtWidgets.QTableWidgetItem("Нет данных"))
+            return
+            
+        # Настройка таблицы
+        self.stats_table.setRowCount(len(stats_data))
+        self.stats_table.setColumnCount(2)
+        self.stats_table.setHorizontalHeaderLabels(["Параметр", "Значение"])
+        
+        # Сортировка ключей по номеру в начале
+        sorted_keys = sorted(stats_data.keys(), key=lambda x: int(x.split('.')[0]))
+        
+        # Заполнение данных
+        for row, key in enumerate(sorted_keys):
+            param_item = QtWidgets.QTableWidgetItem(key.split('. ')[1])
+            value_item = QtWidgets.QTableWidgetItem(str(stats_data[key]))
+            
+            param_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
+            value_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
+            
+            self.stats_table.setItem(row, 0, param_item)
+            self.stats_table.setItem(row, 1, value_item)
+        
+        # Автоматическое выравнивание столбцов
+        self.stats_table.resizeColumnsToContents()
+
+    def calculate_and_update_stats(self):
+        """Рассчитывает статистику и обновляет таблицу"""
+        current_dataset = self.dataset_combo.currentText()
+        dataset_info = self.datasets.get(current_dataset, {})
+        
+        # Показываем прогресс
+        progress = QtWidgets.QProgressDialog("Расчет статистики...", "Отмена", 0, 100, self)
+        progress.setWindowTitle("Обработка")
+        progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        progress.show()
+        
+        # Имитируем прогресс (в реальном коде здесь будет расчет)
+        for i in range(1, 101):
+            progress.setValue(i)
+            QtWidgets.QApplication.processEvents()
+            if progress.wasCanceled():
+                break
+            time.sleep(0.02)  # Имитация долгой операции
+        
+        # Рассчитываем статистику
+        stats = self.calculate_dataset_stats(dataset_info)
+        
+        progress.close()
+        
+        if stats is None:
+            QtWidgets.QMessageBox.warning(self, "Ошибка", "Не удалось рассчитать статистику для выбранного датасета")
+            return
+            
+        # Обновляем таблицу
+        self.update_stats_table(stats)
+    
+    def update_content(self):
+        """Обновляет описание при выборе другого датасета"""
+        current_dataset = self.dataset_combo.currentText()
+        dataset_info = self.datasets.get(current_dataset, {})
+        self.description_label.setText(dataset_info.get("description", "Описание не найдено"))
+        self.update_visualization()
+    
+    def open_dataset_folder(self):
+        """Открывает папку с выбранным датасетом"""
+        current_dataset = self.dataset_combo.currentText()
+        dataset_path = self.datasets.get(current_dataset, {}).get("path")
+        if dataset_path and os.path.exists(dataset_path):
+            os.startfile(dataset_path)
+        else:
+            QtWidgets.QMessageBox.warning(self, "Ошибка", "Путь к датасету не найден!")
+
+class UNet(nn.Module):
+    class ResNet_Block(nn.Module):
+        def __init__(self, input_channels, output_channels):
+            super().__init__()
+
+            self.model_convolution = nn.Sequential(
+                nn.Conv2d(input_channels, output_channels, 3, padding=1, bias=False),
+                nn.ReLU(inplace=True),
+            )
+
+            self.model_ResNet = nn.Sequential(
+                nn.Conv2d(output_channels, output_channels, 3, padding=1, bias=False),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(output_channels, output_channels, 3, padding=1, bias=False),
+                nn.BatchNorm2d(output_channels),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(output_channels, output_channels, 3, padding=1, bias=False),
+                nn.BatchNorm2d(output_channels)
+            )
+
+        def forward(self, x):
+            y = self.model_convolution(x)
+            out = self.model_ResNet(y)
+            return torch.nn.functional.relu(y + out)
+
+    class Two_Conv_Layers(nn.Module):
+        def __init__(self, input_channels, output_channels):
+            super().__init__()
+            self.model = nn.Sequential(
+                nn.Conv2d(input_channels, output_channels, 3, padding=1, bias=False),
+                nn.BatchNorm2d(output_channels),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(output_channels, output_channels, 3, padding=1, bias=False),
+                nn.BatchNorm2d(output_channels),
+                nn.ReLU(inplace=True),
+            )
+
+        def forward(self, x):
+            return self.model(x)
+
+    class Max_Pool_Block(nn.Module):
+        def __init__(self, input_channels, output_channels):
+            super().__init__()
+            self.Max_Pool_Layer = nn.MaxPool2d(2)
+            self.ResNet = UNet.ResNet_Block(input_channels, output_channels)
+
+        def forward(self, x):
+            rn = self.ResNet(x)
+            y = self.Max_Pool_Layer(rn)
+            return y, rn
+
+    class Decoder_Block(nn.Module):
+        def __init__(self, in_channels, out_channels):
+            super().__init__()
+            self.transpose = nn.ConvTranspose2d(in_channels, out_channels, 2, stride=2)
+            self.block = UNet.ResNet_Block(in_channels, out_channels)
+
+        def forward(self, x, y):
+            x = self.transpose(x)
+            u = torch.cat([x, y], dim=1)
+            u = self.block(u)
+            return u
+
+    def __init__(self, in_channels=3, num_classes=1):
+        super().__init__()
+        self.enc_block1 = self.Max_Pool_Block(in_channels, 32)
+        self.enc_block2 = self.Max_Pool_Block(32, 64)
+        self.enc_block3 = self.Max_Pool_Block(64, 128)
+        self.enc_block4 = self.Max_Pool_Block(128, 256)
+
+        self.bottleneck = self.Two_Conv_Layers(256, 512)
+
+        self.dec_block1 = self.Decoder_Block(512, 256)
+        self.dec_block2 = self.Decoder_Block(256, 128)
+        self.dec_block3 = self.Decoder_Block(128, 64)
+        self.dec_block4 = self.Decoder_Block(64, 32)
+
+        self.out = nn.Conv2d(32, num_classes, 1)
+
+    def forward(self, x):
+        x, y1 = self.enc_block1(x)
+        x, y2 = self.enc_block2(x)
+        x, y3 = self.enc_block3(x)
+        x, y4 = self.enc_block4(x)
+
+        x = self.bottleneck(x)
+
+        x = self.dec_block1(x, y4)
+        x = self.dec_block2(x, y3)
+        x = self.dec_block3(x, y2)
+        x = self.dec_block4(x, y1)
+
+        return torch.sigmoid(self.out(x))
+
+
+class ModelTab(QtWidgets.QWidget):
+    def __init__(self):
+        super().__init__()
+        self.model_path = "D:/dataset_egor_003_19/best_Blood_Cells_model_unet_version_9.pth"
+        self.dataset_folder = "D:/dataset_egor_003_19/train/images"
+        self.mask_folder = "D:/dataset_egor_003_19/train/masks"
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.tr_img = tfs_v2.Compose([tfs_v2.ToImage(), tfs_v2.ToDtype(torch.float32, scale=True)])
+        self.initUI()
+        
+    def load_model_safely(self):
+        """Безопасная загрузка модели с проверкой файла"""
+        model_path = "D:/dataset_egor_003_19/best_Blood_Cells_model_unet_version_9.pth"
+        
+        try:
+            if not os.path.exists(model_path):
+                raise FileNotFoundError(f"Файл модели не найден: {model_path}")
+            
+            file_size = os.path.getsize(model_path)
+            if file_size < 1024:
+                raise ValueError(f"Файл модели слишком мал ({file_size} байт), возможно поврежден")
+            
+            with open(model_path, 'rb') as f:
+                buffer = io.BytesIO(f.read())
+            
+            model = UNet().to(self.device)
+            state_dict = torch.load(buffer, map_location=self.device)
+            model.load_state_dict(state_dict['model_state_dict'])
+            model.eval()
+            
+            print(f"Модель успешно загружена! Размер: {file_size/1024/1024:.2f} MB")
+            return model
+            
+        except Exception as e:
+            error_msg = f"""
+            Критическая ошибка загрузки модели:
+            {str(e)}
+            
+            Необходимые действия:
+            1. Проверьте путь к модели: {model_path}
+            2. Убедитесь, что файл не поврежден
+            3. Попробуйте пересохранить модель:
+            torch.save(model.state_dict(), "new_model.pt")
+            """
+            QtWidgets.QMessageBox.critical(self, "Ошибка", error_msg)
+            return None
+
+    def splitting_photo(self, photo_path, buffer_path):
+        """Разделение изображения на части 256x256"""
+        print('SPLITTING PHOTO')
+        image = cv2.imread(photo_path)
+        if image is None:
+            raise ValueError(f"Не удалось загрузить изображение: {photo_path}")
+        
+        height, width = image.shape[:2]
+        
+        if height < 256 or width < 256:
+            raise ValueError(f"Изображение слишком маленькое ({width}x{height}), минимальный размер 256x256")
+        
+        os.makedirs(buffer_path, exist_ok=True)
+        
+        h_steps = (height - 256) // 24 + 1
+        w_steps = (width - 256) // 32 + 1
+        
+        for i in range(h_steps):
+            for j in range(w_steps):
+                h = i * 24
+                w = j * 32
+                
+                if h + 256 > height:
+                    h = height - 256
+                if w + 256 > width:
+                    w = width - 256
+                
+                img_patch = image[h:h+256, w:w+256].copy()
+                saving_path = os.path.join(buffer_path, f'img_{i}_{j}.jpg')
+                cv2.imwrite(saving_path, img_patch)
+
+    def getting_masks(self, model, buffer_path_img, buffer_path_masks):
+        """Генерация масок для частей изображения"""
+        print('FORMING 256X256 MASKS')
+        os.makedirs(buffer_path_masks, exist_ok=True)
+        
+        for i in range(12):
+            for j in range(15):
+                path = os.path.join(buffer_path_img, f'img_{i}_{j}.jpg')
+                img = cv2.imread(path)
+                if img is None:
+                    continue
+                
+                img_tensor = self.tr_img(img).unsqueeze(0).to(self.device)
+                with torch.no_grad():
+                    output = model(img_tensor)
+                output = output.detach().to('cpu').numpy()[0][0]
+
+                mask = np.zeros((256, 256))
+                for k in range(256):
+                    for s in range(256):
+                        if 0.999999 < output[k][s] < 1.000001:
+                            mask[k][s] = 255
+                
+                mask_path = os.path.join(buffer_path_masks, f'mask_{i}_{j}.jpg')
+                cv2.imwrite(mask_path, mask)
+
+    def forming_general_mask(self, path_for_saving_predicting_general_mask, buffer_masks, original_height, original_width):
+        """Сборка общей маски из частей"""
+        general_mask = np.zeros((original_height, original_width))
+        
+        mask_files = [f for f in os.listdir(buffer_masks) if f.startswith('mask_')]
+        
+        for mask_file in mask_files:
+            try:
+                parts = mask_file.split('_')
+                i = int(parts[1])
+                j = int(parts[2].split('.')[0])
+                
+                path = os.path.join(buffer_masks, mask_file)
+                mask = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+                if mask is None:
+                    continue
+                    
+                coord_start = (i * 24, j * 32)
+                for y in range(256):
+                    for x in range(256):
+                        h, w = coord_start[0] + y, coord_start[1] + x
+                        if h < original_height and w < original_width:
+                            general_mask[h][w] = mask[y][x]
+            except Exception as e:
+                print(f"Ошибка обработки маски {mask_file}: {e}")
+        
+        kernel = np.ones((3, 3))
+        cleaned_mask = cv2.morphologyEx(general_mask, cv2.MORPH_OPEN, kernel)
+        final_mask = cv2.morphologyEx(cleaned_mask, cv2.MORPH_CLOSE, kernel)
+        final_mask = (final_mask * 255).astype(np.uint8)
+        cv2.imwrite(path_for_saving_predicting_general_mask, final_mask)
+        print('SAVE MASK')
+
+    def clean_directory(self, path):
+        """Очистка временной директории"""
+        if os.path.exists(path):
+            shutil.rmtree(path)
+        os.makedirs(path, exist_ok=True)
+
+    def initUI(self):
+        layout = QtWidgets.QVBoxLayout()
+        
+        # Model selection
+        model_group = QtWidgets.QGroupBox("Выбор модели")
+        model_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 14px;
+                font-weight: bold;
+                padding-top: 15px;
+            }
+        """)
+        model_layout = QtWidgets.QVBoxLayout()
+        
+        self.model_combo = QtWidgets.QComboBox()
+        self.model_combo.addItem("UNet (Blood Cells segmentation)")
+        model_layout.addWidget(self.model_combo)
+        
+        # Model description
+        self.model_desc = QtWidgets.QLabel()
+        self.model_desc.setWordWrap(True)
+        self.model_desc.setText(
+            "Модель: UNet для сегментации клеток крови\n\n"
+            "Характеристики:\n"
+            "- Архитектура: UNet\n"
+            "- Входной размер: 704x520 пикселей\n"
+            "- Выход: бинарная маска сегментации\n"
+            "- Обучена на датасете Blood Cells\n"
+            "- Функция потерь: Dice Loss\n"
+            "- Оптимизатор: Adam"
+        )
+        model_layout.addWidget(self.model_desc)
+        
+        # Run button
+        self.run_btn = QtWidgets.QPushButton("Запустить модель на случайном изображении")
+        self.run_btn.clicked.connect(self.run_model_on_random_image)
+        model_layout.addWidget(self.run_btn)
+        
+        model_group.setLayout(model_layout)
+        layout.addWidget(model_group)
+        
+        # Visualization area - только результат
+        self.vis_group = QtWidgets.QGroupBox("Результат сегментации")
+        self.vis_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 14px;
+                font-weight: bold;
+                padding-top: 15px;
+            }
+        """)
+        self.vis_layout = QtWidgets.QVBoxLayout()
+        
+        self.result_label = QtWidgets.QLabel()
+        self.result_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.result_label.setStyleSheet("border: 1px solid #d0d0d0;")
+        
+        self.vis_layout.addWidget(self.result_label)
+        self.vis_group.setLayout(self.vis_layout)
+        layout.addWidget(self.vis_group)
+        
+        self.setLayout(layout)
+    
+    def run_model_on_random_image(self):
+        """Обработка случайного изображения"""
+        try:
+            model = self.load_model_safely()
+            if model is None:
+                return
+                
+            image_files = [f for f in os.listdir(self.dataset_folder) 
+                         if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+            
+            if not image_files:
+                QtWidgets.QMessageBox.warning(self, "Ошибка", "В папке с датасетом нет изображений!")
+                return
+                
+            filename = random.choice(image_files)
+            img_path = os.path.join(self.dataset_folder, filename)
+            self.process_single_image(img_path, model)
+                
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Ошибка", f"Произошла ошибка: {str(e)}")
+    
+    def process_single_image(self, img_path, model):
+        """Обработка одного изображения"""
+        try:
+            original_img = cv2.imread(img_path)
+            if original_img is None:
+                raise ValueError(f"Не удалось загрузить изображение: {img_path}")
+                
+            original_height, original_width = original_img.shape[:2]
+
+            temp_img_dir = "temp_img"
+            temp_mask_dir = "temp_mask"
+            self.clean_directory(temp_img_dir)
+            self.clean_directory(temp_mask_dir)
+            
+            self.splitting_photo(img_path, temp_img_dir)
+            self.getting_masks(model, temp_img_dir, temp_mask_dir)
+            
+            output_mask_path = "temp_output_mask.jpg"
+            self.forming_general_mask(output_mask_path, temp_mask_dir, original_height, original_width)
+            
+            self.show_result(img_path, output_mask_path)
+            
+            shutil.rmtree(temp_img_dir)
+            shutil.rmtree(temp_mask_dir)
+            if os.path.exists(output_mask_path):
+                os.remove(output_mask_path)
+                
+        except Exception as e:
+            error_msg = f"Ошибка обработки изображения {os.path.basename(img_path)}: {str(e)}"
+            print(error_msg)
+            self.result_label.setText(error_msg)
+            QtWidgets.QMessageBox.critical(self, "Ошибка", error_msg)
+    
+    def show_result(self, img_path, mask_path):
+        """Отображение результата с наложением маски"""
+        original_img = cv2.imread(img_path)
+        mask_img = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        
+        if original_img is None or mask_img is None:
+            raise ValueError("Не удалось загрузить изображение или маску")
+        
+        overlay = original_img.copy()
+        overlay[mask_img > 127] = (0, 255, 0)  # Зеленый для маски
+        alpha = 0.5
+        blended = cv2.addWeighted(original_img, 1 - alpha, overlay, alpha, 0)
+        
+        height, width, _ = blended.shape
+        bytes_per_line = 3 * width
+        q_img = QImage(blended.data, width, height, bytes_per_line, QImage.Format.Format_BGR888)
+        
+        pixmap = QPixmap.fromImage(q_img)
+        scaled_pixmap = pixmap.scaled(704, 520, QtCore.Qt.AspectRatioMode.KeepAspectRatio)
+        self.result_label.setPixmap(scaled_pixmap)
+        self.result_label.setText("")
+
+class NotebookTab(QtWidgets.QWidget):
+    def __init__(self):
+        super().__init__()
+        self.notebooks_folder = r"C:\Users\alexa\Videos\.ipynb"  # Замените на ваш путь
+        self.initUI()
+        self.load_notebooks_list()
+        
+    def initUI(self):
+        self.layout = QtWidgets.QVBoxLayout()
+        
+        # Control layout
+        control_layout = QtWidgets.QHBoxLayout()
+        
+        # Notebooks combo box
+        self.notebooks_combo = QtWidgets.QComboBox()
+        self.notebooks_combo.currentIndexChanged.connect(self.load_selected_notebook)
+        control_layout.addWidget(self.notebooks_combo)
+        
+        self.layout.addLayout(control_layout)
+        
+        # Scroll area for content
+        self.scroll = QtWidgets.QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        
+        self.content_widget = QtWidgets.QWidget()
+        self.content_layout = QtWidgets.QVBoxLayout()
+        self.content_widget.setLayout(self.content_layout)
+        
+        self.scroll.setWidget(self.content_widget)
+        self.layout.addWidget(self.scroll)
+        
+        self.setLayout(self.layout)
+    
+    def load_notebooks_list(self):
+        self.notebooks_combo.clear()
+        
+        if not os.path.exists(self.notebooks_folder):
+            self.notebooks_combo.addItem("Папка не найдена!")
+            return
+            
+        notebook_files = [f for f in os.listdir(self.notebooks_folder) 
+                         if f.endswith('.ipynb')]
+        
+        if not notebook_files:
+            self.notebooks_combo.addItem("Нет .ipynb файлов в папке")
+            return
+            
+        self.notebooks_combo.addItem("-- Выберите ноутбук --")
+        
+        for file in sorted(notebook_files):
+            self.notebooks_combo.addItem(file)
+    
+    def load_selected_notebook(self, index):
+        if index <= 0:
+            return
+            
+        filename = self.notebooks_combo.itemText(index)
+        filepath = os.path.join(self.notebooks_folder, filename)
+        self.display_notebook(filepath)
+    
+    def clear_content(self):
+        while self.content_layout.count():
+            child = self.content_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+    
+    def display_notebook(self, file_path):
+        self.clear_content()
+        
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                notebook = nbformat.read(f, as_version=4)
+                
+            for cell in notebook.cells:
+                if cell.cell_type == 'markdown':
+                    self.display_markdown(cell)
+                elif cell.cell_type == 'code':
+                    self.display_code_cell(cell)
+                
+        except Exception as e:
+            error_label = QtWidgets.QLabel(f"Ошибка загрузки ноутбука: {str(e)}")
+            self.content_layout.addWidget(error_label)
+    
+    def display_markdown(self, cell):
+        html_content = markdown(cell.source)
+        label = QtWidgets.QLabel()
+        label.setTextFormat(Qt.TextFormat.RichText)
+        label.setText(html_content)
+        label.setWordWrap(True)
+        label.setMargin(10)
+        self.content_layout.addWidget(label)
+    
+    def display_code_cell(self, cell):
+        # Display code
+        code_label = QtWidgets.QLabel(f"<pre><code>{html.escape(cell.source)}</code></pre>")
+        code_label.setTextFormat(Qt.TextFormat.RichText)
+        code_label.setStyleSheet("""
+            background-color: #f5f5f5; 
+            padding: 10px;
+            font-family: monospace;
+            border-radius: 4px;
+            margin: 5px 0;
+        """)
+        self.content_layout.addWidget(code_label)
+        
+        # Display outputs
+        if cell.outputs:
+            for output in cell.outputs:
+                if output.output_type == 'stream':
+                    self.display_stream_output(output)
+                elif output.output_type in ['display_data', 'execute_result']:
+                    self.display_data_output(output)
+                elif output.output_type == 'error':
+                    self.display_error_output(output)
+    
+    def display_stream_output(self, output):
+        text = ''.join(output.text)
+        output_label = QtWidgets.QLabel(f"<pre>{html.escape(text)}</pre>")
+        output_label.setTextFormat(Qt.TextFormat.RichText)
+        output_label.setStyleSheet("""
+            color: #333; 
+            padding: 5px;
+            font-family: monospace;
+            background-color: #f8f8f8;
+            border-radius: 4px;
+            margin: 5px 0;
+        """)
+        self.content_layout.addWidget(output_label)
+    
+    def display_data_output(self, output):
+        if 'text/plain' in output.data:
+            text = output.data['text/plain']
+            if isinstance(text, list):
+                text = ''.join(text)
+            output_label = QtWidgets.QLabel(f"<pre>{html.escape(str(text))}</pre>")
+            output_label.setTextFormat(Qt.TextFormat.RichText)
+            output_label.setStyleSheet("font-family: monospace;")
+            self.content_layout.addWidget(output_label)
+        
+        if 'text/html' in output.data:
+            html_content = output.data['text/html']
+            if isinstance(html_content, list):
+                html_content = ''.join(html_content)
+            output_label = QtWidgets.QLabel()
+            output_label.setTextFormat(Qt.TextFormat.RichText)
+            output_label.setText(html_content)
+            self.content_layout.addWidget(output_label)
+        
+        if 'image/png' in output.data:
+            self.display_image(output.data['image/png'])
+    
+    def display_image(self, image_data):
+        try:
+            if isinstance(image_data, list):
+                image_data = ''.join(image_data)
+            
+            image_bytes = base64.b64decode(image_data)
+            
+            pixmap = QPixmap()
+            pixmap.loadFromData(QByteArray(image_bytes), 'PNG')
+            
+            if pixmap.isNull():
+                raise ValueError("Не удалось загрузить изображение")
+            
+            image_label = QtWidgets.QLabel()
+            image_label.setPixmap(pixmap)
+            image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            image_label.setStyleSheet("""
+                margin: 10px 0;
+                padding: 5px;
+                background-color: white;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+            """)
+            self.content_layout.addWidget(image_label)
+            
+        except Exception as e:
+            error_label = QtWidgets.QLabel(f"Ошибка загрузки изображения: {str(e)}")
+            error_label.setStyleSheet("color: red;")
+            self.content_layout.addWidget(error_label)
+    
+    def display_error_output(self, output):
+        error_text = '\n'.join(output.traceback)
+        error_label = QtWidgets.QLabel(f"<pre style='color: red;'>{html.escape(error_text)}</pre>")
+        error_label.setTextFormat(Qt.TextFormat.RichText)
+        error_label.setStyleSheet("""
+            background-color: #ffeeee;
+            padding: 10px;
+            border-radius: 4px;
+            margin: 5px 0;
+        """)
+        self.content_layout.addWidget(error_label)
+
+
+class DatabaseViewer(QtWidgets.QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("База данных Фото")
+        self.setGeometry(100, 100, 1200, 700)
+        
+        # Основной layout
+        self.layout = QtWidgets.QVBoxLayout()
+        
+        # Создаем группу для выбора датасета
+        group_box = QtWidgets.QGroupBox("Выбор датасета")
+        group_box.setStyleSheet("""
+            QGroupBox {
+                font-size: 14px;
+                font-weight: bold;
+                padding-top: 15px;
+            }
+        """)
+        group_layout = QtWidgets.QHBoxLayout()
+        
+        # Выпадающий список для выбора таблицы
+        self.dataset_combo = QtWidgets.QComboBox()
+        self.dataset_combo.addItem("Основной датасет (ImageData)")
+        self.dataset_combo.addItem("BloodSetGen (imagedata2)")
+        self.dataset_combo.currentIndexChanged.connect(self.load_data)
+        
+        # Кнопки управления
+        self.refresh_button = QtWidgets.QPushButton("Обновить")
+        self.refresh_button.clicked.connect(self.scan_and_update_db)
+        
+        self.process_button = QtWidgets.QPushButton("Обработать новые изображения")
+        self.process_button.clicked.connect(self.process_new_images)
+        
+        # Добавляем элементы в группу
+        group_layout.addWidget(QtWidgets.QLabel("Доступные датасеты:"))
+        group_layout.addWidget(self.dataset_combo)
+        group_layout.addWidget(self.refresh_button)
+        group_layout.addWidget(self.process_button)
+        group_box.setLayout(group_layout)
+        
+        # Таблица для отображения данных
+        self.table = QtWidgets.QTableWidget()
+        
+        # Добавляем элементы в основной layout
+        self.layout.addWidget(group_box)
+        self.layout.addWidget(self.table)
+        
+        self.setLayout(self.layout)
+        self.load_data()
+
+    def load_data(self):
+        try:
+            conn = pymysql.connect(
+                host="localhost",
+                user="root",
+                password="Dorogusha1",
+                database="JupiterDB"
+            )
+            cursor = conn.cursor()
+            
+            # Определяем, какую таблицу загружать
+            selected_dataset = self.dataset_combo.currentText()
+            table_name = "imagedata2" if "imagedata2" in selected_dataset else "ImageData"
+            
+            # Экранируем зарезервированные слова MySQL
+            columns = [
+                "image_name", "mask_name",
+                "image_mean", "mask_mean",
+                "image_variance", "mask_variance",
+                "image_std_dev", "mask_std_dev",
+                "image_laws", "mask_laws",
+                "image_features", "mask_features",
+                "image_glcm", "mask_glcm",
+                "intersection_image_mask", "`over_image_mask`",  # Экранируем over
+                "precision_image_mask", "recall_image_mask",
+                "l1_metric_image_mask",
+                "intersection_watershed_mask", "`over_watershed_mask`",  # Экранируем over
+                "precision_watershed_mask", "recall_watershed_mask",
+                "l1_metric_watershed_mask",
+                "intersection_kmeans_mask", "`over_kmeans_mask`",  # Экранируем over
+                "precision_kmeans_mask", "recall_kmeans_mask",
+                "l1_metric_kmeans_mask"
+            ]
+            
+            # Добавляем ID в начало списка колонок
+            full_columns = ["id"] + columns
+            
+            # Выполняем запрос
+            cursor.execute(f"SELECT {','.join(full_columns)} FROM {table_name}")
+            rows = cursor.fetchall()
+            conn.close()
+            
+            # Настраиваем таблицу
+            self.table.setRowCount(len(rows))
+            self.table.setColumnCount(len(full_columns))
+            self.table.setHorizontalHeaderLabels([col.replace('`', '') for col in full_columns])  # Убираем кавычки для отображения
+            
+            # Заполняем таблицу данными
+            for row_idx, row_data in enumerate(rows):
+                for col_idx, col_data in enumerate(row_data):
+                    item = QtWidgets.QTableWidgetItem(str(col_data))
+                    item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                    self.table.setItem(row_idx, col_idx, item)
+                    
+            # Автоматическое выравнивание столбцов
+            self.table.resizeColumnsToContents()
+            
+            # Подключаем обработчик клика по ячейке
+            self.table.cellClicked.connect(self.show_image)
+            
+        except pymysql.MySQLError as err:
+            print(f"Ошибка подключения к БД: {err}")
+            QtWidgets.QMessageBox.critical(self, "Ошибка БД", f"Ошибка при выполнении запроса:\n{err}")
+            
+    def process_new_images(self):
+        selected_dataset = self.dataset_combo.currentText()
+        table_name = "imagedata2" if "imagedata2" in selected_dataset else "ImageData"
+        
+        try:
+            # Создаем экземпляр процессора
+            processor = ImageProcessor(self)
+            
+            # Устанавливаем текущий датасет
+            processor.set_current_dataset(table_name)
+            
+            # Обрабатываем изображения
+            if processor.process_new_images():
+                self.load_data()  # Обновляем таблицу после обработки
+            else:
+                QtWidgets.QMessageBox.warning(self, "Ошибка", "Не удалось обработать изображения")
+                
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Ошибка",
+                f"Произошла ошибка при обработке изображений:\n{str(e)}"
+            )
+
+    def scan_and_update_db(self):
+        selected_dataset = self.dataset_combo.currentText()
+        
+        if "imagedata2" in selected_dataset:
+            images_folder = "D:/imagedata2"
+            masks_folder = "D:/imagedata2"
+            table_name = "imagedata2"
+            img_prefix = "image_"
+            mask_prefix = "mask_"
+        else:
+            images_folder = "D:/dataset_egor_003_19/test/img"
+            masks_folder = "D:/dataset_egor_003_19/test/mask"
+            table_name = "ImageData"
+            img_prefix = "img_"
+            mask_prefix = "mask_"
+
+        progress = QtWidgets.QProgressDialog("Сканирование папки...", "Отмена", 0, 100, self)
+        progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        progress.show()
+
+        try:
+            conn = pymysql.connect(host="localhost", user="root", password="Dorogusha1", database="JupiterDB")
+            cursor = conn.cursor()
+            
+            # 1. Получаем существующие ID из БД
+            cursor.execute(f"SELECT id FROM {table_name}")
+            existing_ids = {row[0] for row in cursor.fetchall()}
+            progress.setValue(20)
+
+            # 2. Сканируем папку и создаем mapping: ID -> имя файла
+            id_to_files = {}
+            
+            # Сначала обрабатываем изображения (проверяем оба расширения)
+            for filename in os.listdir(images_folder):
+                if (filename.startswith(img_prefix) and 
+                    (filename.lower().endswith('.png') or filename.lower().endswith('.jpg'))):
+                    try:
+                        # Извлекаем ID из имени файла
+                        num_part = filename[len(img_prefix):].split('.')[0]  # Убираем префикс и расширение
+                        image_id = int(num_part)  # Конвертируем в число (0247 -> 247)
+                        id_to_files.setdefault(image_id, {})['image'] = filename
+                    except ValueError:
+                        continue
+
+            # Затем обрабатываем маски (проверяем оба расширения)
+            for filename in os.listdir(masks_folder):
+                if (filename.startswith(mask_prefix) and 
+                    (filename.lower().endswith('.png') or filename.lower().endswith('.jpg'))):
+                    try:
+                        num_part = filename[len(mask_prefix):].split('.')[0]
+                        image_id = int(num_part)
+                        id_to_files.setdefault(image_id, {})['mask'] = filename
+                    except ValueError:
+                        continue
+
+            progress.setValue(50)
+
+            # 3. Находим новые записи (где есть и изображение и маска)
+            new_records = []
+            for image_id, files in id_to_files.items():
+                if image_id not in existing_ids and 'image' in files and 'mask' in files:
+                    new_records.append((image_id, files['image'], files['mask']))
+
+            progress.setValue(70)
+
+            # 4. Добавляем новые записи в БД
+            if new_records:
+                added = 0
+                for image_id, img_name, mask_name in new_records:
+                    try:
+                        cursor.execute(
+                            f"INSERT INTO {table_name} (id, image_name, mask_name) VALUES (%s, %s, %s)",
+                            (image_id, img_name, mask_name)
+                        )
+                        added += 1
+                    except pymysql.Error as e:
+                        print(f"Ошибка при добавлении ID {image_id}: {e}")
+                
+                conn.commit()
+                msg = f"Добавлено {added} новых записей"
+            else:
+                msg = "Новых изображений не найдено"
+
+            progress.setValue(100)
+            QtWidgets.QMessageBox.information(self, "Готово", msg)
+
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Ошибка", str(e))
+        finally:
+            if 'conn' in locals():
+                conn.close()
+            progress.close()
+            self.load_data()
+
+    def show_image(self, row, col):
+        selected_dataset = self.dataset_combo.currentText()
+        
+        if "imagedata2" in selected_dataset:
+            # Для BloodSetGen (imagedata2)
+            images_folder = "D:/imagedata2"
+            masks_folder = "D:/imagedata2"
+            
+            # Определяем, какой столбец был выбран
+            if col == 1:  # Столбец "image_name"
+                image_name = self.table.item(row, col).text()
+                image_path = os.path.join(images_folder, image_name)
+            elif col == 2:  # Столбец "mask_name"
+                mask_name = self.table.item(row, col).text()
+                image_path = os.path.join(masks_folder, mask_name)
+            else:
+                return
+        else:
+            # Для основного датасета
+            images_folder = "D:/dataset_egor_003_19/test/img"
+            masks_folder = "D:/dataset_egor_003_19/test/mask"
+            
+            # Определяем, какой столбец был выбран
+            if col == 1:  # Столбец "image_name"
+                image_name = self.table.item(row, col).text()
+                image_path = os.path.join(images_folder, image_name)
+            elif col == 2:  # Столбец "mask_name"
+                mask_name = self.table.item(row, col).text()
+                image_path = os.path.join(masks_folder, mask_name)
+            else:
+                return
+
+        # Проверяем, существует ли файл
+        if os.path.exists(image_path):
+            self.display_image(image_path)
+        else:
+            print(f"Ошибка: файл {image_path} не найден")
+
+    def display_image(self, path):
+        # Создаем окно для отображения изображения
+        image_viewer = QtWidgets.QLabel()
+        pixmap = QtGui.QPixmap(path)
+        image_viewer.setPixmap(pixmap)
+        image_viewer.setScaledContents(True)
+        image_viewer.setWindowTitle("Просмотр изображения")
+        image_viewer.resize(600, 400)
+        image_viewer.show()
+        self.image_viewer = image_viewer
+
+if __name__ == "__main__":
+    app = QtWidgets.QApplication(sys.argv)
+    window = MLApp()
+    window.show()
+    sys.exit(app.exec())
